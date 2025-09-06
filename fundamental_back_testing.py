@@ -58,21 +58,53 @@ def load_equity_prices(path: str, gvkey_col="gvkey", date_col="datadate",
     """
     Returns a wide DataFrame indexed by date with columns as gvkey,
     containing adjusted close 'adj_close_q = prccd / ajexdi'.
+    Optimized for large files with chunked reading.
     """
     ext = os.path.splitext(path)[1].lower()
+    
+    # optimized: chunked reading large file
+    chunk_size = 100000  # read 100,000 rows at a time
+    chunks = []
+    
     if ext in [".csv", ".txt"]:
-        df = pd.read_csv(path)
+        # use chunked reading
+        for chunk in pd.read_csv(path, chunksize=chunk_size, low_memory=False):
+            # only keep required columns
+            required_cols = [gvkey_col, date_col, prccd_col, ajexdi_col]
+            chunk = chunk[required_cols]
+            
+            # data type conversion
+            chunk[date_col] = pd.to_datetime(chunk[date_col])
+            chunk[prccd_col] = pd.to_numeric(chunk[prccd_col], errors='coerce')
+            chunk[ajexdi_col] = pd.to_numeric(chunk[ajexdi_col], errors='coerce')
+            
+            # calculate adjusted price
+            chunk["adj_close_q"] = chunk[prccd_col] / chunk[ajexdi_col]
+            
+            # delete invalid data
+            chunk = chunk.dropna(subset=[date_col, "adj_close_q"])
+            
+            chunks.append(chunk)
+        
+        # merge all chunks
+        df = pd.concat(chunks, ignore_index=True)
     else:
         df = pd.read_excel(path)
-    for c in [gvkey_col, date_col, prccd_col, ajexdi_col]:
-        if c not in df.columns:
-            raise ValueError(f"Equity file {path} must contain column '{c}'")
-    df[date_col] = pd.to_datetime(df[date_col])
+        for c in [gvkey_col, date_col, prccd_col, ajexdi_col]:
+            if c not in df.columns:
+                raise ValueError(f"Equity file {path} must contain column '{c}'")
+        df[date_col] = pd.to_datetime(df[date_col])
+        df["adj_close_q"] = df[prccd_col].astype(float) / df[ajexdi_col].astype(float)
+    
+    # sort and pivot
     df = df.sort_values([date_col, gvkey_col])
-    df["adj_close_q"] = df[prccd_col].astype(float) / df[ajexdi_col].astype(float)
     pivot = df.pivot_table(index=date_col, columns=gvkey_col, values="adj_close_q", aggfunc="last")
     pivot = pivot.sort_index()
     pivot = pivot.replace([np.inf, -np.inf], np.nan)
+    
+    # clear memory 
+    del df, chunks
+    
     return pivot
 
 def load_weights(path: str, gvkey_col="gvkey", date_col="trade_date", weight_col="weights") -> pd.DataFrame:
@@ -354,7 +386,14 @@ def generate_comparison_charts(daily_returns_map: Dict[str, pd.Series], out_dir:
         ret_map = {k: resample_returns(daily_returns_map[k], freq=freq) for k in labels}
 
         # Equity comparison chart (not rolling)
-        eq_df = pd.DataFrame({k: (1.0 + ret_map[k]).cumprod() for k in labels})
+        #
+        # eq_df = pd.DataFrame({k: (1.0 + ret_map[k]).cumprod() for k in labels})
+         # Equity comparison chart (not rolling) - normalize to start from 1
+        eq_df = pd.DataFrame()
+        for k in labels:
+            if not ret_map[k].empty:
+                equity = (1.0 + ret_map[k]).cumprod()
+                eq_df[k] = equity / equity.iloc[0]  # normalize to start from 1
         _plot_multi(eq_df, f"Equity Curve Comparison ({freq})", os.path.join(out_dir, f"comparison_equity_{freq}.png"))
         eq_df.to_csv(os.path.join(out_dir, f"comparison_equity_{freq}.csv"))
 
@@ -442,7 +481,7 @@ def main():
     parser.add_argument("--rf", type=float, default=0.02, help="annual risk-free rate")
     parser.add_argument("--mar", type=float, default=0.0, help="annual minimum acceptable return (Sortino MAR)")
     parser.add_argument("--cost", type=float, default=None, help="(ignored) static TRANSACTION_COST in code")
-    parser.add_argument("--start", type=str, default="2015-01-01", help="start date YYYY-MM-DD")
+    parser.add_argument("--start", type=str, default="2018-03-01", help="start date YYYY-MM-DD")
     parser.add_argument("--end", type=str, default="2025-06-30", help="end date YYYY-MM-DD")
     parser.add_argument("--out", type=str, default="test_back", help="output directory")
     parser.add_argument("--ir-benchmark", type=str, choices=["SPX","QQQ"], default="SPX", help="IR benchmark series")
@@ -452,10 +491,10 @@ def main():
     parser.add_argument("--index-spx", type=str, default="SPX.csv")
     parser.add_argument("--index-qqq", type=str, default="QQQ.csv")
     parser.add_argument("--equity-file", type=str, default="./data_processor/sp500_tickers_daily_price_20250712.csv")
-    parser.add_argument("--weights-mean", type=str, default="./output/mean_weighted.xlsx")
-    parser.add_argument("--weights-min", type=str, default="./output/minimum_weighted.xlsx")
-    parser.add_argument("--weights-equal", type=str, default="./output/equally_weighted.xlsx")
-    parser.add_argument("--weights-drl", type=str, default="./output/drl_weight.csv")
+    parser.add_argument("--weights-mean", type=str, default="./outputs/mean_weighted.xlsx")
+    parser.add_argument("--weights-min", type=str, default="./outputs/minimum_weighted.xlsx")
+    parser.add_argument("--weights-equal", type=str, default="./outputs/equally_weighted.xlsx")
+    parser.add_argument("--weights-drl", type=str, default="./outputs/drl_weight.csv")
     parser.add_argument("--anchor", type=str, default="MeanVar", choices=["MeanVar","MinVar","Equal","DRL"],
                         help="anchor strategy for aligning quarterly trade dates")
 
@@ -557,6 +596,9 @@ def main():
         }.items():
             rs = resample_returns(daily_series, freq=chart_f)
             eq = (1.0 + rs).cumprod()
+            # normalize to start from 1
+            if not eq.empty:
+                eq = eq / eq.iloc[0]
             dd, _ = compute_drawdown(eq)
             save_timeseries_csv(label, eq, dd, args.out, suffix=chart_f)
             save_equity_and_dd_plots(label, eq, dd, args.out, suffix=chart_f)

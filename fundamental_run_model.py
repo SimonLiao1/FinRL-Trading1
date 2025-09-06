@@ -46,7 +46,12 @@ if __name__ == '__main__':
     # load sector data
     inputfile_sector = args.sector_input
   
-    sector_data=pd.read_excel(inputfile_sector)
+    sector_data=pd.read_excel(inputfile_sector, index_col=0)  # This will treat the first column as index
+    # OR if you want to keep it as a column but drop it:
+    # sector_data=pd.read_excel(inputfile_sector)
+    # if 'Unnamed: 0' in sector_data.columns:
+    #     sector_data = sector_data.drop(columns=['Unnamed: 0'])
+    
     unique_datetime = sorted(sector_data.date.unique())
 
 
@@ -72,6 +77,10 @@ if __name__ == '__main__':
     
     # features column: different base on sectors
     no_feature_column_names = args.no_feature_column_names
+    # Exclude the 'Unnamed: 0' column that gets added when saving Excel files
+    if 'Unnamed: 0' in sector_data.columns:
+        no_feature_column_names.append('Unnamed: 0')
+    
     features_column = [x for x in sector_data.columns.values if (x not in no_feature_column_names) and (np.issubdtype(sector_data[x].dtype, np.number) and(not np.any(np.isnan(sector_data[x]))))]
     
     #sector name
@@ -93,7 +102,7 @@ if __name__ == '__main__':
         print('Time Spent: ',(end-start)/60,' minutes')
         ml_model.save_model_result(model_result,sector_name)
 
-    except e:
+    except Exception as e:
         print(e)
 
     
